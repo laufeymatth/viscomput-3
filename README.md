@@ -27,3 +27,8 @@ Tilt needs HTTPS on phones.
 - `src/cameraRig.ts`: limited orbit + gyro tilt
 - `src/splitSlider.ts`: split handle
 - `src/viewer.ts`: `createViewer()`, framework-agnostic entry point
+
+## Deploy
+
+Every push to `main` builds and deploys to GitHub Pages via `.github/workflows/pages.yml`:
+https://laufeymatth.github.io/viscomput-3/
