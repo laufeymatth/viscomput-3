@@ -1,0 +1,22 @@
+{
+  "title": "My capture",
+  "old": {
+    "url": "old.spz",
+    "label": "Old",
+    "transform": [1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1]
+  },
+  "new": {
+    "url": "new.spz",
+    "label": "New",
+    "transform": [1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1]
+  },
+  "camera": {
+    "position": [0, 0, 0],
+    "target": [0, 0, -20],
+    "fovDeg": 43.4,
+    "maxYawDeg": 4,
+    "maxPitchDeg": 2,
+    "minDistance": 16,
+    "maxDistance": 22
+  }
+}
