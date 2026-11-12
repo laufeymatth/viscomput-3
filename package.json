@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@sparkjsdev/spark": "^2.4.0",
+    "onnxruntime-web": "^1.31.1",
     "three": "^0.186.1"
   },
   "devDependencies": {

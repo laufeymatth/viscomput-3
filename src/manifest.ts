@@ -1,11 +1,26 @@
 // Contract between the (future) Python preprocessing backend and the viewer.
 
+/** Pinhole camera of the source photo, in the splat file's own coordinates (OpenCV: +z forward, +y down). */
+export interface Intrinsics {
+  fx: number;
+  fy: number;
+  cx: number;
+  cy: number;
+  width: number;
+  height: number;
+}
+
 export interface SplatSide {
   /** Relative to the manifest's folder, or absolute. */
   url: string;
   label: string;
   /** Optional 4x4 column-major matrix (alignment result, axis flips, ...). */
   transform?: number[];
+  /** Source photo the splat was made from. */
+  image?: string;
+  /** Precomputed SAM 2.1 image embeddings (tools/sam_embed.py). */
+  sam?: string;
+  intrinsics?: Intrinsics;
 }
 
 export interface CameraSpec {

@@ -21,6 +21,24 @@ Tilt needs HTTPS on phones.
    Both splats must already share a coordinate frame; `transform` is an optional
    4x4 column-major matrix per side.
 
+## Bringing old parts into the new scene
+
+"✂ Old part" lets you tap a region of the old photo (SAM 2.1 segmentation) and see the
+old splats replace the new ones there. Needs `image`, `sam` and `intrinsics` on the old
+side and `intrinsics` on the new side in the manifest; both photos must be taken from the
+same spot (SHARP single-image splats).
+
+Preprocessing, once per old photo:
+
+```sh
+python -m venv tools/.venv && tools/.venv/Scripts/pip install -r tools/requirements.txt
+# download the SAM 2.1 ONNX export into tools/models/sam2.1-base-plus/
+#   https://huggingface.co/onnx-community/sam2.1-hiera-base-plus-ONNX (onnx/vision_encoder.onnx + _data)
+python tools/sam_embed.py public/comparisons/<id>/old.jpg public/comparisons/<id>/old.sam.bin
+```
+
+The matching decoder lives in `public/models/sam2.1-base-plus/` and runs in the browser.
+
 ## Layout
 
 - `src/splitRenderer.ts`: two scenes, each with its own SparkRenderer, drawn with a scissor split

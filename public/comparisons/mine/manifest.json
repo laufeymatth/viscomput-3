@@ -3,12 +3,31 @@
   "old": {
     "url": "old.spz",
     "label": "Old",
-    "transform": [1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1]
+    "transform": [1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1],
+    "image": "old.jpg",
+    "sam": "old.sam.bin",
+    "intrinsics": {
+      "fx": 1356.3528,
+      "fy": 1356.3528,
+      "cx": 815.5,
+      "cy": 540,
+      "width": 1631,
+      "height": 1080
+    }
   },
   "new": {
     "url": "new.spz",
     "label": "New",
-    "transform": [1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1]
+    "transform": [1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1],
+    "image": "new.jpg",
+    "intrinsics": {
+      "fx": 1356.3528,
+      "fy": 1356.3528,
+      "cx": 815.5,
+      "cy": 540,
+      "width": 1631,
+      "height": 1080
+    }
   },
   "camera": {
     "position": [0, 0, 0],

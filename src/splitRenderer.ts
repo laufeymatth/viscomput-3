@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
-import type { SplatSide } from "./manifest";
+import type { Intrinsics, SplatSide } from "./manifest";
+import type { PhotoMask } from "./photoMask";
 
 const MAX_PIXEL_RATIO = 1.5;
 
@@ -13,6 +14,10 @@ export class SplitRenderer {
   private readonly oldScene = new THREE.Scene();
   private readonly newScene = new THREE.Scene();
   private readonly size = new THREE.Vector2();
+  private oldMesh?: SplatMesh;
+  private newMesh?: SplatMesh;
+  /** Old splats shown inside the new scene where the replace mask is set. */
+  private oldInNew?: SplatMesh;
 
   constructor(container: HTMLElement) {
     // antialias off: MSAA doesn't help splats and costs a lot on mobile.
@@ -58,7 +63,42 @@ export class SplitRenderer {
       return mesh.initialized;
     };
 
-    await Promise.all([loadSide("old", this.oldScene), loadSide("new", this.newScene)]);
+    [this.oldMesh, this.newMesh] = await Promise.all([loadSide("old", this.oldScene), loadSide("new", this.newScene)]);
+  }
+
+  /**
+   * Replace mode: inside `mask` (drawn on the old photo), the new scene shows the
+   * old splats instead of its own. Both photos must share a viewpoint.
+   */
+  enableReplace(mask: PhotoMask, oldIntrinsics: Intrinsics, newIntrinsics: Intrinsics) {
+    const { oldMesh, newMesh } = this;
+    if (!oldMesh || !newMesh || this.oldInNew) return;
+
+    // Shares the already-loaded old splat data; nothing is downloaded twice.
+    const oldInNew = new SplatMesh({ packedSplats: oldMesh.packedSplats });
+    oldInNew.matrixAutoUpdate = false;
+    oldInNew.matrix.copy(oldMesh.matrix);
+    oldInNew.objectModifier = mask.modifier(oldIntrinsics, "object");
+    oldInNew.updateGenerator();
+    oldInNew.visible = false;
+    this.newScene.add(oldInNew);
+    this.oldInNew = oldInNew;
+
+    newMesh.objectModifier = mask.modifier(newIntrinsics, "rest");
+    newMesh.updateGenerator();
+  }
+
+  /** The old side's loaded splat data (undefined until load() completes). */
+  get oldSplats() {
+    return this.oldMesh?.packedSplats;
+  }
+
+  /** Call after the mask contents change; `active` = the mask has anything in it. */
+  replaceMaskChanged(active: boolean) {
+    if (!this.oldInNew || !this.newMesh) return;
+    this.oldInNew.visible = active;
+    this.oldInNew.updateVersion();
+    this.newMesh.updateVersion();
   }
 
   setSize(width: number, height: number) {
