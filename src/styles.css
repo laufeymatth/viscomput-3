@@ -162,3 +162,36 @@ html, body, #app {
   box-shadow: 0 0 0 4px rgba(0, 0, 0, 0.6);
 }
 .region-box.draft { outline-style: dashed; opacity: 0.7; }
+
+/* VR spike: Enter/Exit VR with session status (replaces Spark's toggle button). */
+.vr-controls {
+  position: absolute; left: 12px; bottom: calc(12px + var(--safe-bottom)); z-index: 20;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+  max-width: min(420px, calc(100% - 24px));
+}
+.vr-status {
+  padding: 6px 12px; border-radius: 12px;
+  background: var(--chip); backdrop-filter: blur(6px);
+  font-size: 14px;
+}
+.vr-status[data-state="starting"] { color: #fd6; }
+.vr-status[data-state="in-vr"] { color: #9f9; }
+.vr-status[data-state="unsupported"] { color: #f99; }
+.vr-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* VR spike: WebXR call log (src/xrDebug.ts). */
+.xr-debug {
+  position: absolute; right: 12px; top: calc(56px + var(--safe-top)); z-index: 20;
+  width: min(560px, calc(100% - 24px));
+  background: rgba(0, 0, 0, 0.8); border-radius: 12px; padding: 6px 10px;
+  font-size: 13px;
+}
+.xr-debug summary { cursor: pointer; display: flex; align-items: center; gap: 8px; }
+.xr-debug-copy { font: inherit; padding: 2px 10px; border-radius: 8px; border: 1px solid #ccc; background: #222; color: #eee; cursor: pointer; }
+.xr-debug-log {
+  margin: 6px 0 0; max-height: 45vh; overflow: auto; white-space: pre-wrap;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.xr-debug-log .ok { color: #9f9; } .xr-debug-log .wait { color: #fd6; } .xr-debug-log .err { color: #f88; }
+/* Narrow screens: the option buttons wrap onto several rows, so start the log below them. */
+@media (max-width: 900px) { .xr-debug { top: calc(170px + var(--safe-top)); } }

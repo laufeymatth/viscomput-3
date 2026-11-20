@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { PackedSplats, SparkRenderer, SparkXr, SplatMesh } from "@sparkjsdev/spark";
 import { CameraRig } from "./cameraRig";
+import { XrDebug } from "./xrDebug";
 import type { Manifest } from "./manifest";
 import { pickRegions } from "./regionPicker";
 import { formatRegions, parseRegions, splitByRegions, type Region } from "./regions";
@@ -76,6 +77,13 @@ export interface XrOptions {
   tintLow: boolean;
   /** Starting LoD fraction for the low-detail regions (one of LOW_FRACTIONS); A cycles from there. */
   lowFraction: number;
+  /**
+   * Make three.js draw through a classic XRWebGLLayer instead of a WebXR Layers
+   * projection layer. On by default: Chrome 157 over Quest Link never delivers a
+   * single frame to a projection-layer session (measured), while XRWebGLLayer
+   * streams at full rate. `layers=1` opts back into projection layers.
+   */
+  classicLayer: boolean;
 }
 
 /** Multiplied into low-detail splat colours when tinting. */
@@ -98,6 +106,7 @@ export function parseXrOptions(params: URLSearchParams): XrOptions {
     lowRegions: parseRegions(params.get("low")),
     tintLow: params.get("tint") === "1",
     lowFraction: Number(params.get("lowfrac")) || LOW_FRACTIONS[0],
+    classicLayer: params.get("layers") !== "1",
   };
 }
 
@@ -141,8 +150,12 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
   };
   // White = on. Tap to flip and reload.
   const toggle = (label: string, key: string, on: boolean) => link(label, key, on ? "0" : "1", on);
+  // Patch the WebXR entry points before anything (Spark, three.js) touches them.
+  const debug = new XrDebug(root, { forceClassicLayer: opts.classicLayer });
+
   $(".xr-options").append(
     ...[0.5, 1].map((fb) => link(`fb ${fb}`, "fb", String(fb), fb === opts.framebufferScale)),
+    link("Classic XR layer", "layers", opts.classicLayer ? "1" : "0", opts.classicLayer),
     toggle("LoD", "lod", opts.lod),
     toggle("LoD quality", "lodq", opts.lodQuality),
     toggle("Front layer only", "front", opts.frontLayer),
@@ -287,29 +300,38 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
   const rig = new CameraRig(renderer.domElement, manifest.camera);
   const xrCamera = new THREE.PerspectiveCamera(70, 1, 0.01, 1000);
 
+  const vrControls = new VrControls(root, () => xr);
   const xr = new SparkXr({
     renderer,
     mode: "vr",
     referenceSpaceType: "local",
     frameBufferScaleFactor: opts.framebufferScale,
+    // Our own Enter/Exit buttons (VrControls) drive the session; Spark's click handler
+    // goes on this detached element and never fires.
+    element: document.createElement("span"),
     onReady: (supported) => {
       // Browsers only expose WebXR on secure pages: https, or http://localhost (e.g. over USB with adb reverse).
       const reason = !window.isSecureContext
         ? `VR blocked: plain http on ${location.hostname} isn't a secure page. Open http://localhost:${location.port}/?xr over USB (adb reverse tcp:${location.port} tcp:${location.port}), or allow this address under chrome://flags → "Insecure origins treated as secure"`
         : "VR not available in this browser (needs a headset)";
       status.textContent = `${side.label} · ${supported ? "VR ready" : reason}`;
+      vrControls.setSupported(supported);
     },
     // The Quest browser may run at 90 Hz; start at 72 Hz (13.9 ms per frame instead of 11.1 ms).
     onEnterXr: () => {
       rateIndex = 0;
       return setRate();
     },
+    onExitXr: () => vrControls.sessionEnded(),
   });
+  renderer.xr.addEventListener("sessionstart", () => debug.log("three.js: sessionstart (setSession finished, frame loop handed to the session)", "ok"));
+  renderer.xr.addEventListener("sessionend", () => debug.log("three.js: sessionend"));
 
   // A (right): splat count · B (right): hide splat · X (left): splat size · Y (left): refresh rate.
-  // Right thumbstick press: tint low-detail regions.
+  // Right thumbstick press: tint low-detail regions. Left thumbstick press: exit VR.
   // xr-standard gamepad mapping: buttons[3] = thumbstick press, buttons[4] = A/X, buttons[5] = B/Y.
   const actions = {
+    "left:3": () => vrControls.exit(),
     "right:4": () => (countIndex = (countIndex + 1) % COUNT_LEVELS.length),
     "right:5": () => (splatGroup.visible = !splatGroup.visible),
     "right:3": () => {
@@ -410,12 +432,14 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
       loadSeconds = (performance.now() - loadStart) / 1000;
       root.classList.remove("loading");
       updateInfo();
+      vrControls.setLoaded();
       renderer.setAnimationLoop((now) => {
         const dt = Math.min(0.1, (now - last) / 1000);
         last = now;
         const presenting = renderer.xr.isPresenting;
         let offset = 0;
         if (presenting) {
+          vrControls.frame();
           pollButtons();
           // Head pose from the previous frame; one frame of lag is fine for a fade.
           headPos.setFromMatrixPosition(renderer.xr.getCamera().matrixWorld);
@@ -443,6 +467,7 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
     ready,
     xr,
     dispose() {
+      vrControls.exit();
       renderer.setAnimationLoop(null);
       resizeObserver.disconnect();
       rig.dispose();
@@ -451,6 +476,174 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
       root.remove();
     },
   };
+}
+
+type VrState = "checking" | "unsupported" | "idle" | "starting" | "in-vr";
+
+/** After this long in "starting", explain that Link can be slow on first launch. */
+const SLOW_START_S = 20;
+
+/**
+ * Enter/Exit VR buttons plus a status line, replacing Spark's single toggle button.
+ * The browser allows only one immersive session, and a request can take minutes to
+ * resolve over Quest Link, so Enter is locked while a request is pending. A pending
+ * request can't be aborted from JS: Exit then ends the session as soon as it arrives,
+ * and "Reload page" force-ends it (navigating away always ends a session).
+ */
+class VrControls {
+  private state: VrState = "checking";
+  private startedAt = 0;
+  private timer = 0;
+  private cancelRequested = false;
+  private error = "";
+  /** The render loop only starts once the splats are loaded; until then a session would get no frames. */
+  private loaded = false;
+  /** XR frames rendered in this session, and the count at the last status update (for fps). */
+  private frames = 0;
+  private framesAtTick = 0;
+  private tickAt = 0;
+  private fps = 0;
+  private readonly statusEl: HTMLDivElement;
+  private readonly enterBtn: HTMLButtonElement;
+  private readonly exitBtn: HTMLButtonElement;
+  private readonly reloadBtn: HTMLButtonElement;
+
+  constructor(root: HTMLElement, private readonly getXr: () => SparkXr) {
+    const el = document.createElement("div");
+    el.className = "vr-controls";
+    el.innerHTML = `
+      <div class="vr-status" role="status"></div>
+      <div class="vr-buttons">
+        <button type="button" class="btn btn-primary vr-enter">Enter VR</button>
+        <button type="button" class="btn vr-exit">Exit VR</button>
+        <button type="button" class="btn vr-reload">Reload page</button>
+      </div>`;
+    root.appendChild(el);
+    this.statusEl = el.querySelector(".vr-status")!;
+    this.enterBtn = el.querySelector(".vr-enter")!;
+    this.exitBtn = el.querySelector(".vr-exit")!;
+    this.reloadBtn = el.querySelector(".vr-reload")!;
+    this.enterBtn.addEventListener("click", () => void this.enter());
+    this.exitBtn.addEventListener("click", () => this.exit());
+    this.reloadBtn.addEventListener("click", () => location.reload());
+    this.render();
+  }
+
+  setSupported(supported: boolean) {
+    if (this.state === "checking") this.setState(supported ? "idle" : "unsupported");
+  }
+
+  setLoaded() {
+    this.loaded = true;
+    this.render();
+  }
+
+  /** Call once per rendered XR frame. */
+  frame() {
+    this.frames++;
+  }
+
+  async enter() {
+    if (this.state !== "idle" || !this.loaded) return;
+    const xr = this.getXr();
+    this.cancelRequested = false;
+    this.error = "";
+    this.startedAt = performance.now();
+    this.setState("starting");
+    console.info("[vr] requesting session…");
+    // Spark's toggleXr logs and swallows its own errors; success = it stored a session.
+    await xr.toggleXr();
+    const session = xr.session;
+    const seconds = ((performance.now() - this.startedAt) / 1000).toFixed(1);
+    if (!session) {
+      console.warn(`[vr] no session after ${seconds} s`);
+      this.error = "Couldn't start VR (details in the console). If the headset still shows a session, use Reload page.";
+      this.setState("idle");
+      return;
+    }
+    console.info(`[vr] session started after ${seconds} s (headset: ${session.visibilityState})`);
+    if (this.cancelRequested) {
+      console.info("[vr] exit was requested while starting; ending session");
+      void session.end();
+      return;
+    }
+    session.addEventListener("visibilitychange", () => {
+      console.info(`[vr] headset visibility: ${session.visibilityState} (after ${this.frames} frames)`);
+      this.render();
+    });
+    this.frames = this.framesAtTick = 0;
+    this.tickAt = performance.now();
+    this.fps = 0;
+    this.setState("in-vr");
+  }
+
+  /** Ends the session, or (while one is still starting) ends it as soon as it arrives. */
+  exit() {
+    if (this.state === "in-vr") {
+      void this.getXr().session?.end();
+    } else if (this.state === "starting") {
+      this.cancelRequested = true;
+      this.render();
+    }
+  }
+
+  /** Called by SparkXr when the session ends for any reason (us, the headset, the browser). */
+  sessionEnded() {
+    console.info("[vr] session ended");
+    this.cancelRequested = false;
+    this.setState("idle");
+  }
+
+  private setState(state: VrState) {
+    this.state = state;
+    clearInterval(this.timer);
+    if (state === "starting" || state === "in-vr") this.timer = window.setInterval(() => this.tick(), 1000);
+    this.render();
+  }
+
+  private tick() {
+    if (this.state === "in-vr") {
+      const now = performance.now();
+      this.fps = ((this.frames - this.framesAtTick) * 1000) / (now - this.tickAt);
+      this.framesAtTick = this.frames;
+      this.tickAt = now;
+    }
+    this.render();
+  }
+
+  private render() {
+    const { state } = this;
+    const waited = Math.round((performance.now() - this.startedAt) / 1000);
+    let text: string;
+    switch (state) {
+      case "checking":
+        text = "Checking for a headset…";
+        break;
+      case "unsupported":
+        text = "No VR headset found";
+        break;
+      case "idle":
+        text = this.error || (this.loaded ? "Not in VR" : "Loading splats… Enter VR unlocks when done");
+        break;
+      case "starting":
+        text = this.cancelRequested
+          ? `Exiting as soon as the headset answers… (${waited} s) — Reload page to force it`
+          : `Starting VR… ${waited} s — keep the headset on` +
+            (waited >= SLOW_START_S ? ". Link can take minutes the first time; don't click again" : "");
+        break;
+      case "in-vr": {
+        const visibility = this.getXr().session?.visibilityState ?? "?";
+        text = `In VR · ${this.frames} frames (${Math.round(this.fps)} fps) · headset: ${visibility} · left stick press or Exit VR to leave`;
+        break;
+      }
+    }
+    this.statusEl.textContent = text;
+    this.statusEl.dataset.state = state;
+    this.enterBtn.hidden = state !== "idle";
+    this.enterBtn.disabled = !this.loaded;
+    this.exitBtn.hidden = state !== "in-vr" && !(state === "starting" && !this.cancelRequested);
+    this.reloadBtn.hidden = state !== "starting" && !this.error;
+  }
 }
 
 /** Black inside-out sphere around the head that fades in as the user leaves the valid viewpoint. */

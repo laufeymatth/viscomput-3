@@ -53,7 +53,23 @@ head. WebXR only works on secure pages: https, or `http://localhost`.
 The 2D page has toggles (resolution, LoD, front layer, which side) and a stats panel; the
 same stats show on a panel below your view in VR. Controllers: **A** splat budget,
 **B** hide splats, **X** max splat size, **Y** refresh rate, **right stick press** tint
-low-detail regions.
+low-detail regions, **left stick press** exit VR. The bottom-left panel shows the session
+state (starting / in VR, frames, headset visibility) and has Exit VR and Reload page buttons;
+the top-right **XR log** times every WebXR call (Copy button for bug reports).
+
+### Quest Link gotchas (Chrome 157, Windows)
+
+- **Projection layers get no frames.** three.js uses a WebXR Layers projection layer when the
+  browser has one; over Link the session starts but the browser never delivers a frame. The
+  viewer therefore hides the Layers API so three.js uses a classic `XRWebGLLayer` (`&layers=1`
+  opts back in). `/xr-hello.html` is a bare WebXR page that tests both layer types.
+- **~100 s to start a session.** Meta's runtime loads its plugins (haptics, hand, body…)
+  inside Chrome's sandboxed XR process; each one's IPC pipe is blocked and times out after ~11 s
+  (see `%LOCALAPPDATA%\Oculus\Service_*.txt`, written when the Link service stops). Chrome 157
+  ignores `--disable-features=XRSandbox`; only `--no-sandbox` makes it instant, which turns off
+  all of Chrome's protection, so use it only in a separate profile for localhost. Otherwise
+  start VR once and keep the session running.
+- NVIDIA drivers newer than 591.86 freeze Link (Meta's own warning in the Link app).
 
 **Pick low-detail regions** lets you drag rectangles over parts of the photo that may be
 blurrier; those go through Spark's LoD at 50/25/100% of their splats (A), the rest stays at
