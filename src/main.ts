@@ -2,12 +2,19 @@ import { loadManifest } from "./manifest";
 import { createViewer } from "./viewer";
 
 const app = document.getElementById("app")!;
-const id = new URLSearchParams(location.search).get("c") ?? "mine";
+const params = new URLSearchParams(location.search);
+const id = params.get("c") ?? "mine";
 
 loadManifest(id)
-  .then(({ manifest, baseUrl }) => {
+  .then(async ({ manifest, baseUrl }) => {
     document.title = `${manifest.title} · Splat Compare`;
-    createViewer(app, manifest, baseUrl).ready.catch(console.error);
+    if (params.has("xr")) {
+      // VR spike lives in its own chunk so the phone viewer doesn't load it.
+      const { createXrViewer, parseXrOptions } = await import("./xrViewer");
+      createXrViewer(app, manifest, baseUrl, parseXrOptions(params)).ready.catch(console.error);
+    } else {
+      createViewer(app, manifest, baseUrl).ready.catch(console.error);
+    }
   })
   .catch((err: Error) => {
     app.innerHTML = `<p class="fatal"></p>`;

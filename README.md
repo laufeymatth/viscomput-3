@@ -39,6 +39,33 @@ python tools/sam_embed.py public/comparisons/<id>/old.jpg public/comparisons/<id
 
 The matching decoder lives in `public/models/sam2.1-base-plus/` and runs in the browser.
 
+## VR (work in progress)
+
+`/?xr` opens the WebXR view: one scene at a time, with the photo's viewpoint placed at your
+head. WebXR only works on secure pages: https, or `http://localhost`.
+
+- **Meta Quest Link (PC renders, headset displays):** on the PC, `npm run dev` and open
+  `http://localhost:5173/?xr` in Chrome or Edge with the headset connected over Link.
+- **Standalone Quest (headset renders):** `npm run dev:https` (self-signed; accept the warning on
+  the headset) and open `https://<pc-ip>:5173/?xr`. Or over USB: `adb reverse tcp:5173 tcp:5173`
+  and `http://localhost:5173/?xr`.
+
+The 2D page has toggles (resolution, LoD, front layer, which side) and a stats panel; the
+same stats show on a panel below your view in VR. Controllers: **A** splat budget,
+**B** hide splats, **X** max splat size, **Y** refresh rate, **right stick press** tint
+low-detail regions.
+
+**Pick low-detail regions** lets you drag rectangles over parts of the photo that may be
+blurrier; those go through Spark's LoD at 50/25/100% of their splats (A), the rest stays at
+full detail.
+
+Measured on a standalone Quest 2: ~100K splats reach 72 fps, ~300K run at ~23 fps, 500K at
+~10 fps. The cost is the number of splats, not resolution or splat size.
+
+`node scripts/spz-front-layer.mjs in.spz out.front.spz` merges SHARP's two splats per pixel
+into one (half the splats, nearly the same look); the region picker needs these
+`*.front.spz` files.
+
 ## Layout
 
 - `src/splitRenderer.ts`: two scenes, each with its own SparkRenderer, drawn with a scissor split

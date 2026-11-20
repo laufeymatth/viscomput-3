@@ -132,3 +132,33 @@ html, body, #app {
 .picker-dot.neg { background: #e74c3c; }
 .picker-hint { opacity: 0.75; text-align: center; }
 .picker-bar { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+
+/* VR spike: reload-with-params links, kept at the top so Spark's "Enter VR" button stays clear. */
+.toolbar.xr-options {
+  top: calc(56px + var(--safe-top)); bottom: auto;
+  justify-content: flex-start; flex-wrap: wrap; gap: 8px;
+}
+.toolbar.xr-options .btn { display: inline-flex; align-items: center; text-decoration: none; }
+
+/* VR spike: live performance numbers on the 2D page (mirrored on the in-VR panel). */
+.perf {
+  position: absolute; right: 12px; bottom: calc(12px + var(--safe-bottom));
+  margin: 0; padding: 8px 12px; border-radius: 12px;
+  background: var(--chip); backdrop-filter: blur(6px);
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre; pointer-events: none;
+  max-width: calc(100% - 24px); overflow: hidden; text-overflow: ellipsis;
+}
+.viewer.loading .perf { visibility: hidden; }
+
+/* VR spike: low-detail region picker (reuses the .picker overlay). */
+.region-picker .picker-stage { touch-action: none; cursor: crosshair; user-select: none; }
+.region-layer { position: absolute; inset: 0; pointer-events: none; }
+.region-box {
+  position: absolute;
+  /* Hatched so it reads on any photo, sky included. */
+  background: repeating-linear-gradient(45deg, rgba(0, 0, 0, 0.45) 0 6px, rgba(255, 255, 255, 0.25) 6px 12px);
+  outline: 2px solid #fff;
+  box-shadow: 0 0 0 4px rgba(0, 0, 0, 0.6);
+}
+.region-box.draft { outline-style: dashed; opacity: 0.7; }
