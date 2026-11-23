@@ -13,6 +13,13 @@ export const MASK_SIZE = 256;
 const DEPTH_BAND = 0.2;
 
 /**
+ * "rest" only hides the other scene's splats from this fraction in front of the
+ * object's front surface. Anything nearer is something standing in front of the
+ * added object (e.g. a person nearer the camera) and must stay, covering it.
+ */
+const NEAR_BAND = 0.15;
+
+/**
  * A soft mask over a source photo plus the selected object's front depth, used
  * to show or hide splats by where their centre projects into that photo. Works
  * because SHARP splats are generated per pixel from a camera at the origin, so
@@ -47,8 +54,9 @@ export class PhotoMask {
 
   /**
    * "object": keep only splats that are the selected object (inside the mask and
-   * not behind it). "rest": hide splats inside the mask up to the object's back,
-   * keeping what lies behind it so moving the camera reveals background, not a hole.
+   * not behind it). "rest": hide splats inside the mask around the object's depth
+   * (from just in front of it to its back), keeping what lies behind it so moving the
+   * camera reveals background, not a hole, and what stands clearly in front of it.
    */
   modifier(intrinsics: Intrinsics, keep: "object" | "rest") {
     const { fx, fy, cx, cy, width, height } = intrinsics;
@@ -69,6 +77,8 @@ export class PhotoMask {
               float front = texture(${inputs.depth}, uv).r;
               float back = front * ${f(1 + DEPTH_BAND)};
               float inDepth = front > 0.0 ? 1.0 - smoothstep(back, back * 1.05, c.z) : 0.0;
+              ${keep === "rest" ? `float near = front * ${f(1 - NEAR_BAND)};
+              inDepth *= smoothstep(near * 0.95, near, c.z);` : ""}
               sel = m * inDepth;
             }
           }

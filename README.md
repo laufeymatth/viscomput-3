@@ -50,10 +50,31 @@ head. WebXR only works on secure pages: https, or `http://localhost`.
   the headset) and open `https://<pc-ip>:5173/?xr`. Or over USB: `adb reverse tcp:5173 tcp:5173`
   and `http://localhost:5173/?xr`.
 
-The 2D page has toggles (resolution, LoD, front layer, which side) and a stats panel; the
-same stats show on a panel below your view in VR. Controllers: **A** splat budget,
-**B** hide splats, **X** max splat size, **Y** refresh rate, **right stick press** tint
-low-detail regions, **left stick press** exit VR. The bottom-left panel shows the session
+The 2D page has toggles (resolution, LoD, front layer) and a stats panel; the
+same stats show on a panel below your view in VR. Both captures are loaded, so old/new switches
+live: the page's Show old/new button, the **Old / New** buttons on the panel to your left in VR,
+or **grip** while not pointing at that panel.
+
+**Old parts in VR:** when the manifest has the old photo's `image`, `sam` and `intrinsics` (and
+the new side's `intrinsics`), the panel on the left shows the old photo. Point a controller at
+it: **trigger** adds a point to select, **grip** adds a point to exclude. Each point re-runs SAM
+and the selected old splats appear in the new scene immediately. One object per part: the part
+being edited is orange on the photo; press **✓ Keep part** (highlighted while you have points)
+before pointing at the next object, otherwise the new points are added to the same part and SAM
+tries to cover both. Kept parts turn blue. **Undo** removes the last point (or the last kept
+part); **Clear** removes all. Works the other way too: when the new side also has `image` and `sam`,
+the panel's **Old photo / New photo** buttons pick which photo you select on, and parts of the
+new photo appear in the old scene (grip off the panel still switches the splats). The page's ✂ Old part button does the same with the mouse. (SAM runs on the main thread, so
+expect a short hitch in the headset per point.)
+
+**Moving around:** the view starts at the photo's viewpoint and you can walk away from it
+(SHARP splats look right only near that viewpoint, so expect stretching further out). **Left
+stick** walks where you look, **right stick** left/right turns (smoothly, faster the further you push), up/down rises and sinks,
+**right stick press** jumps back to the photo's viewpoint. The panel and stats move with you.
+
+Other controller buttons: **A** splat budget,
+**B** hide splats, **X** max splat size, **Y** refresh rate, **left stick press** exit VR
+(in low-detail region mode, **right stick press** tints those regions instead of resetting). The bottom-left panel shows the session
 state (starting / in VR, frames, headset visibility) and has Exit VR and Reload page buttons;
 the top-right **XR log** times every WebXR call (Copy button for bug reports).
 
@@ -88,6 +109,7 @@ into one (half the splats, nearly the same look); the region picker needs these
 - `src/cameraRig.ts`: limited orbit + gyro tilt
 - `src/splitSlider.ts`: split handle
 - `src/viewer.ts`: `createViewer()`, framework-agnostic entry point
+- `src/xrViewer.ts`: the WebXR viewer; `src/xrPhotoPanel.ts` (photo panel), `src/partSelection.ts` (parts from the other capture), `src/xrLocomotion.ts` (thumbstick movement)
 
 ## Deploy
 

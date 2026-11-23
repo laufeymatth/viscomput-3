@@ -2,16 +2,13 @@ import * as THREE from "three";
 import { PackedSplats, SparkRenderer, SparkXr, SplatMesh } from "@sparkjsdev/spark";
 import { CameraRig } from "./cameraRig";
 import { XrDebug } from "./xrDebug";
-import type { Manifest } from "./manifest";
+import type { Manifest, SplatSide } from "./manifest";
+import { PartSelection, type Side } from "./partSelection";
+import { pickFromPhoto } from "./photoPicker";
 import { pickRegions } from "./regionPicker";
+import { XrPhotoPanel, type PanelButton } from "./xrPhotoPanel";
+import { XrLocomotion } from "./xrLocomotion";
 import { formatRegions, parseRegions, splitByRegions, type Region } from "./regions";
-
-/**
- * Head offset from the capture origin (metres) where the comfort fade starts / is
- * fully black. SHARP splats are only valid near the photo's viewpoint.
- */
-const FADE_START_M = 0.25;
-const FADE_END_M = 0.5;
 
 /** Spark's own default LoD budget on Oculus browsers. */
 const OCULUS_LOD_SPLATS = 500_000;
@@ -55,6 +52,7 @@ const LOW_FRACTIONS = [0.5, 0.25, 1];
 const PREFERRED_RATES = [72, 60, 90];
 
 export interface XrOptions {
+  /** Side shown first; both are loaded and can be switched live (except with low-detail regions). */
   side: "old" | "new";
   /** Build a LoD tree on load and render at most ~lodSplatCount × lodScale splats. */
   lod: boolean;
@@ -135,8 +133,12 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
   const loaderFill = $<HTMLDivElement>(".loader-fill");
   const loaderText = $<HTMLDivElement>(".loader-text");
   $(".loader-title").textContent = manifest.title;
+  /** Side the page opened with; low-detail regions (region mode) only ever load this one. */
   const side = manifest[opts.side];
-  status.textContent = `${side.label} · checking VR…`;
+  let current: "old" | "new" = opts.side;
+  let vrStatus = "checking VR…";
+  const showStatus = () => (status.textContent = `${manifest[current].label} · ${vrStatus}`);
+  showStatus();
 
   // Framebuffer scale, LoD and side can't change inside a session: page links that reload with new params.
   const link = (label: string, key: string, value: string, active: boolean) => {
@@ -159,8 +161,25 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
     toggle("LoD", "lod", opts.lod),
     toggle("LoD quality", "lodq", opts.lodQuality),
     toggle("Front layer only", "front", opts.frontLayer),
-    link(`Show ${opts.side === "new" ? "old" : "new"}`, "side", opts.side === "new" ? "old" : "new", false),
   );
+  // Region mode loads one side only, so switching reloads; otherwise it's live (sideBtn).
+  const regionMode = opts.lowRegions.length > 0;
+  const sideBtn = document.createElement("button");
+  sideBtn.type = "button";
+  sideBtn.className = "btn";
+  const otherSide = () => (current === "new" ? "old" : "new");
+  if (regionMode) {
+    $(".xr-options").append(link(`Show ${otherSide()}`, "side", otherSide(), false));
+  } else {
+    sideBtn.addEventListener("click", () => showSide(otherSide()));
+    $(".xr-options").append(sideBtn);
+  }
+  const partBtn = document.createElement("button");
+  partBtn.type = "button";
+  partBtn.className = "btn";
+  partBtn.textContent = "✂ Old part";
+  partBtn.hidden = true;
+  $(".xr-options").append(partBtn);
 
   // Low-detail region picker: draw on the source photo, then reload with ?low=…
   if (side.image) {
@@ -190,7 +209,6 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
   const scene = new THREE.Scene();
   const spark = new SparkRenderer({ renderer, lodSplatScale: opts.lodScale });
   scene.add(spark);
-  const regionMode = opts.lowRegions.length > 0;
   /** Splats in the low-detail regions before LoD (known once loaded). */
   let lowSourceSplats = 0;
   let countIndex = regionMode ? Math.max(0, LOW_FRACTIONS.findIndex((f) => f === opts.lowFraction)) : 0;
@@ -229,23 +247,37 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
   };
 
   // The splat's own frame puts the photo's camera at the origin looking down -Z.
+  // Inside the locomotion root, which the thumbsticks move (the panel and HUD stay put).
   const world = new THREE.Group();
   world.scale.setScalar(opts.worldScale);
-  scene.add(world);
+  const loco = new XrLocomotion();
+  loco.root.add(world);
+  scene.add(loco.root);
 
-  // All splat meshes share the splat file's frame (manifest transform).
+  // Every splat mesh; B hides them all. Each mesh carries its side's manifest transform.
   const splatGroup = new THREE.Group();
-  if (side.transform) {
-    splatGroup.matrixAutoUpdate = false;
-    splatGroup.matrix.fromArray(side.transform);
-  }
   world.add(splatGroup);
+  const placed = (mesh: SplatMesh, s: SplatSide) => {
+    if (s.transform) {
+      mesh.matrixAutoUpdate = false;
+      mesh.matrix.fromArray(s.transform);
+    }
+    splatGroup.add(mesh);
+    return mesh;
+  };
 
-  const onProgress = (e: ProgressEvent) => {
-    if (!e.lengthComputable) return loaderFill.classList.add("indeterminate");
-    const f = e.loaded / e.total;
+  const showProgress = (f: number | null) => {
+    if (f == null) return loaderFill.classList.add("indeterminate");
     loaderFill.style.width = `${Math.round(f * 100)}%`;
     loaderText.textContent = `Loading… ${Math.round(f * 100)}%`;
+  };
+  const onProgress = (e: ProgressEvent) => showProgress(e.lengthComputable ? e.loaded / e.total : null);
+  /** Both sides loading at once: report their combined bytes. */
+  const bytes = { old: [0, 0], new: [0, 0] };
+  const sideProgress = (key: "old" | "new") => (e: ProgressEvent) => {
+    bytes[key] = [e.loaded, e.lengthComputable ? e.total : 0];
+    const total = bytes.old[1] + bytes.new[1];
+    showProgress(bytes.old[1] && bytes.new[1] ? (bytes.old[0] + bytes.new[0]) / total : null);
   };
   // Tint the low-detail splats so the regions can be checked in the scene itself.
   let lowMesh: SplatMesh | null = null;
@@ -257,17 +289,24 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
   /** Splats always drawn in full (region mode), for the stats panel. */
   let fullDetailSplats = 0;
   const meshes: SplatMesh[] = [];
+  /** Both sides' meshes (not in region mode). */
+  const sideMeshes: Partial<Record<"old" | "new", SplatMesh>> = {};
   const load = async () => {
     if (!regionMode) {
-      const url = opts.frontLayer ? side.url.replace(/\.spz$/, ".front.spz") : side.url;
-      const mesh = new SplatMesh({
-        url: new URL(url, baseUrl).href,
-        lod: opts.lod ? (opts.lodQuality ? "quality" : true) : undefined,
-        onProgress,
-      });
-      meshes.push(mesh);
-      splatGroup.add(mesh);
-      await mesh.initialized;
+      const loadSide = (key: "old" | "new") => {
+        const s = manifest[key];
+        const url = opts.frontLayer ? s.url.replace(/\.spz$/, ".front.spz") : s.url;
+        const mesh = new SplatMesh({
+          url: new URL(url, baseUrl).href,
+          lod: opts.lod ? (opts.lodQuality ? "quality" : true) : undefined,
+          onProgress: sideProgress(key),
+        });
+        mesh.visible = key === current;
+        meshes.push(mesh);
+        sideMeshes[key] = placed(mesh, s);
+        return mesh.initialized;
+      };
+      await Promise.all([loadSide("old"), loadSide("new")]);
       return;
     }
     // Region mode needs one splat per photo pixel, so always the merged front layer.
@@ -286,14 +325,70 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
     lowMesh = low;
     applyTint();
     meshes.push(detail, low);
-    splatGroup.add(detail, low);
+    placed(detail, side);
+    placed(low, side);
     await Promise.all([detail.initialized, low.initialized]);
   };
 
-  const fade = makeFade();
-  scene.add(fade.mesh);
   const hud = new Hud();
   scene.add(hud.mesh);
+
+  // Panel beside the view: a photo to select parts on (old or new), and its buttons.
+  // A selection per source photo: parts of the old photo go into the new scene and
+  // parts of the new photo into the old one.
+  const selections: Partial<Record<Side, PartSelection>> = {};
+  let photoSide: Side = "old";
+  const activeSelection = () => selections[photoSide] ?? null;
+  let panel: XrPhotoPanel | null = null;
+  const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
+  const refreshPanel = () => {
+    const selection = activeSelection();
+    sideBtn.textContent = `Show ${otherSide()}: ${manifest[otherSide()].label}`;
+    partBtn.textContent = `✂ ${cap(photoSide)} part` + (selection?.active ? ` (${selection.partCount})` : "");
+    if (!panel) return;
+    // Both photos selectable: the buttons pick the photo (the controllers' grip switches
+    // the scene). Otherwise they switch the scene.
+    const buttons: PanelButton[] =
+      selections.old && selections.new
+        ? (["old", "new"] as const).map((k) => ({ id: `photo:${k}`, label: `${cap(k)} photo`, active: photoSide === k }))
+        : (["old", "new"] as const).map((k) => ({ id: k, label: `Show ${k}`, active: current === k }));
+    let hint = "Old / New buttons, or grip anywhere off the panel, switch scenes";
+    if (selection) {
+      const sel = selection;
+      const editing = sel.points.length > 0;
+      const busy = sel.state === "segmenting";
+      const partNo = sel.keptCount + 1;
+      const kept = sel.keptCount;
+      buttons.push(
+        { id: "undo", label: "Undo", disabled: !editing && !sel.active },
+        // The step people miss: without it, points for a second object get added to
+        // the first one and SAM tries to make one mask covering both.
+        { id: "next", label: "✓ Keep part", primary: editing, disabled: !editing || busy },
+        { id: "clear", label: "Clear", disabled: !sel.active && !editing },
+      );
+      const keptNote = kept ? `${kept} kept part${kept > 1 ? "s" : ""} (blue). ` : "";
+      hint =
+        sel.state === "loading" ? "Loading segmentation…\nThe photo can be pointed at in a moment"
+        : sel.state === "error" ? `Segmentation failed: ${sel.error}\nUndo or Clear to try again`
+        : busy ? `Segmenting part ${partNo}…\nOne object per part: ✓ Keep part before starting the next object`
+        : editing ? `Part ${partNo} (orange): happy with it? Press ✓ Keep part\nOnly add points on this SAME object. A different object needs a new part.`
+        : kept ? `${keptNote}Point at another object to start part ${partNo}\nUndo removes the last kept part · grip off the panel switches old/new`
+        : `Point at ONE object in the ${sel.source} photo to bring it into the ${sel.target} scene\nTrigger selects, grip on the photo removes an area · grip off the panel switches old/new`;
+      panel.setSelection(sel.keptCoverage, sel.currentCoverage, sel.points);
+    }
+    panel.setButtons(buttons);
+    panel.setHint(hint);
+  };
+  function showSide(key: "old" | "new") {
+    current = key;
+    if (sideMeshes.old) sideMeshes.old.visible = key === "old";
+    if (sideMeshes.new) sideMeshes.new.visible = key === "new";
+    for (const sel of Object.values(selections)) sel.setShowingTarget(key === sel.target);
+    showStatus();
+    refreshPanel();
+    updateInfo();
+  }
+  refreshPanel();
 
   // Non-XR preview camera, and a separate parentless camera for XR so the head
   // pose is relative to the scene origin (= the capture viewpoint).
@@ -314,7 +409,8 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
       const reason = !window.isSecureContext
         ? `VR blocked: plain http on ${location.hostname} isn't a secure page. Open http://localhost:${location.port}/?xr over USB (adb reverse tcp:${location.port} tcp:${location.port}), or allow this address under chrome://flags → "Insecure origins treated as secure"`
         : "VR not available in this browser (needs a headset)";
-      status.textContent = `${side.label} · ${supported ? "VR ready" : reason}`;
+      vrStatus = supported ? "VR ready" : reason;
+      showStatus();
       vrControls.setSupported(supported);
     },
     // The Quest browser may run at 90 Hz; start at 72 Hz (13.9 ms per frame instead of 11.1 ms).
@@ -328,13 +424,15 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
   renderer.xr.addEventListener("sessionend", () => debug.log("three.js: sessionend"));
 
   // A (right): splat count · B (right): hide splat · X (left): splat size · Y (left): refresh rate.
-  // Right thumbstick press: tint low-detail regions. Left thumbstick press: exit VR.
+  // Right thumbstick press: back to the photo's viewpoint (tint low-detail regions in
+  // region mode). Left thumbstick press: exit VR. Stick tilts move (xrLocomotion.ts).
   // xr-standard gamepad mapping: buttons[3] = thumbstick press, buttons[4] = A/X, buttons[5] = B/Y.
   const actions = {
     "left:3": () => vrControls.exit(),
     "right:4": () => (countIndex = (countIndex + 1) % COUNT_LEVELS.length),
     "right:5": () => (splatGroup.visible = !splatGroup.visible),
     "right:3": () => {
+      if (!regionMode) return loco.reset();
       tint = !tint;
       applyTint();
     },
@@ -379,9 +477,10 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
       opts.lodQuality && "LoD quality",
       regionMode && `${opts.lowRegions.length} low-detail region${opts.lowRegions.length > 1 ? "s" : ""}${tint ? " (tinted)" : ""}`,
     ].filter(Boolean).join(", ");
+    const label = manifest[current].label;
     hud.info = !splatGroup.visible
-      ? `${side.label} HIDDEN (B) · ${flags}`
-      : `A ${count} · X ${s.name} · Y ${hud.targetHz ? `${Math.round(hud.targetHz)} Hz` : "rate"} · ${flags}`;
+      ? `${label} HIDDEN (B) · ${flags}`
+      : `${label} · A ${count} · X ${s.name} · Y ${hud.targetHz ? `${Math.round(hud.targetHz)} Hz` : "rate"} · ${flags}`;
   };
 
   const resize = () => {
@@ -431,6 +530,7 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
     .then(() => {
       loadSeconds = (performance.now() - loadStart) / 1000;
       root.classList.remove("loading");
+      setupPanel();
       updateInfo();
       vrControls.setLoaded();
       renderer.setAnimationLoop((now) => {
@@ -441,15 +541,18 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
         if (presenting) {
           vrControls.frame();
           pollButtons();
-          // Head pose from the previous frame; one frame of lag is fine for a fade.
-          headPos.setFromMatrixPosition(renderer.xr.getCamera().matrixWorld);
-          offset = headPos.length();
+          // Head pose from the previous frame; one frame of lag is fine for steering.
+          const head = renderer.xr.getCamera().matrixWorld;
+          const session = renderer.xr.getSession();
+          if (session) loco.update(session, head, dt);
+          // Distance from the photo's viewpoint, for the stats.
+          offset = loco.toScene(headPos.setFromMatrixPosition(head)).length();
         } else {
           rig.update(dt);
           headPos.setFromMatrixPosition(rig.camera.matrixWorld);
         }
-        fade.update(headPos, presenting ? offset : 0);
         hud.mesh.visible = presenting;
+        panel?.update(presenting);
         // CPU time of the draw call only: Spark's per-frame work plus WebGL command submission.
         const t0 = performance.now();
         renderer.render(scene, presenting ? xrCamera : rig.camera);
@@ -463,11 +566,73 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
       throw err;
     });
 
+  function setupPanel() {
+    const { old: oldMesh, new: newMesh } = sideMeshes;
+    if (!oldMesh || !newMesh) return; // region mode: one side only
+    for (const side of ["old", "new"] as const) {
+      if (!PartSelection.available(manifest, side)) continue;
+      const [source, target] = side === "old" ? [oldMesh, newMesh] : [newMesh, oldMesh];
+      selections[side] = new PartSelection(manifest, baseUrl, side, source, target, refreshPanel);
+    }
+    const first = selections.old ?? selections.new;
+    if (first) {
+      photoSide = first.source;
+      // Bring the selected part into view as soon as it changes.
+      const showTarget = () => {
+        const sel = activeSelection();
+        if (sel && current !== sel.target) showSide(sel.target);
+      };
+      const photoOf = (sel: PartSelection) => ({ url: sel.photoUrl, ...sel.photoSize });
+      panel = new XrPhotoPanel(photoOf(first), {
+        onPhoto: (x, y, positive) => {
+          activeSelection()?.addPoint({ x, y, positive });
+          showTarget();
+        },
+        onButton: (id) => {
+          const sel = activeSelection();
+          if (id === "old" || id === "new") showSide(id);
+          else if (id === "photo:old" || id === "photo:new") {
+            const next = selections[id === "photo:old" ? "old" : "new"];
+            if (!next) return;
+            photoSide = next.source;
+            panel?.setPhoto(photoOf(next));
+            void next.load().catch(() => {});
+            showTarget();
+            refreshPanel();
+          } else if (id === "undo") sel?.undo();
+          else if (id === "next") sel?.nextPart();
+          else if (id === "clear") sel?.clear();
+        },
+        onSqueezeElsewhere: () => showSide(otherSide()),
+      });
+      void first.load().catch(() => {});
+      partBtn.hidden = false;
+      partBtn.addEventListener("click", async () => {
+        const sel = activeSelection();
+        if (!sel) return;
+        const coverage = await pickFromPhoto(root, { imageUrl: sel.photoUrl, title: manifest[sel.source].label, segmenter: sel.load() });
+        if (!coverage) return;
+        sel.addPart(coverage);
+        showTarget();
+      });
+    } else {
+      panel = new XrPhotoPanel(null, {
+        onPhoto: () => {},
+        onButton: (id) => (id === "old" || id === "new") && showSide(id),
+        onSqueezeElsewhere: () => showSide(otherSide()),
+      });
+    }
+    scene.add(panel.group);
+    panel.attachControllers(renderer, scene);
+    showSide(current);
+  }
+
   return {
     ready,
     xr,
     dispose() {
       vrControls.exit();
+      for (const sel of Object.values(selections)) sel.dispose();
       renderer.setAnimationLoop(null);
       resizeObserver.disconnect();
       rig.dispose();
@@ -644,29 +809,6 @@ class VrControls {
     this.exitBtn.hidden = state !== "in-vr" && !(state === "starting" && !this.cancelRequested);
     this.reloadBtn.hidden = state !== "starting" && !this.error;
   }
-}
-
-/** Black inside-out sphere around the head that fades in as the user leaves the valid viewpoint. */
-function makeFade() {
-  const material = new THREE.MeshBasicMaterial({
-    color: 0x000000,
-    side: THREE.BackSide,
-    transparent: true,
-    opacity: 0,
-    depthTest: false,
-    depthWrite: false,
-  });
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.15, 16, 12), material);
-  mesh.renderOrder = 1000;
-  mesh.frustumCulled = false;
-  return {
-    mesh,
-    update(head: THREE.Vector3, offset: number) {
-      mesh.position.copy(head);
-      material.opacity = THREE.MathUtils.smoothstep(offset, FADE_START_M, FADE_END_M);
-      mesh.visible = material.opacity > 0.001;
-    },
-  };
 }
 
 function formatCount(n: number) {

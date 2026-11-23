@@ -112,7 +112,7 @@ html, body, #app {
 
 /* Old-photo picker */
 .picker {
-  position: absolute; inset: 0; z-index: 10;
+  position: absolute; inset: 0; z-index: 30; /* above the VR controls and XR log */
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
   padding: calc(12px + var(--safe-top)) 16px calc(12px + var(--safe-bottom));
   background: var(--bg);

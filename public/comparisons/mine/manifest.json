@@ -20,6 +20,7 @@
     "label": "New",
     "transform": [1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1],
     "image": "new.jpg",
+    "sam": "new.sam.bin",
     "intrinsics": {
       "fx": 1356.3528,
       "fy": 1356.3528,

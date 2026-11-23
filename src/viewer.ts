@@ -2,15 +2,10 @@ import { CameraRig } from "./cameraRig";
 import type { Manifest } from "./manifest";
 import { MASK_SIZE, PhotoMask } from "./photoMask";
 import { pickFromPhoto } from "./photoPicker";
-import { Segmenter } from "./segmenter";
+import { DECODER_URL, Segmenter } from "./segmenter";
 import { SplatProjection } from "./splatProjection";
 import { SplitRenderer } from "./splitRenderer";
 import { SplitSlider } from "./splitSlider";
-
-const DECODER_URL = new URL(
-  "models/sam2.1-base-plus/prompt_encoder_mask_decoder.onnx",
-  new URL(import.meta.env.BASE_URL, location.href),
-).href;
 
 /** Hide a side's label once its half is narrower than this. */
 const LABEL_HIDE_BELOW = 0.15;

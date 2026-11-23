@@ -7,6 +7,12 @@ import { MASK_SIZE } from "./photoMask";
 ort.env.wasm.wasmPaths = { wasm: wasmUrl, mjs: mjsUrl };
 ort.env.wasm.numThreads = 1;
 
+/** SAM 2.1 prompt decoder, served from public/. */
+export const DECODER_URL = new URL(
+  "models/sam2.1-base-plus/prompt_encoder_mask_decoder.onnx",
+  new URL(import.meta.env.BASE_URL, location.href),
+).href;
+
 const SAM_INPUT = 1024;
 /** Encoder output shapes for SAM 2.1 at 1024x1024, in file order (see tools/sam_embed.py). */
 const EMBEDDING_SHAPES = [
