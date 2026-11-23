@@ -11,11 +11,33 @@ import { XrLocomotion } from "./xrLocomotion";
 export interface XrOptions {
   /** Side shown first; both are loaded and can be switched live. */
   side: Side;
+  /**
+   * Load `<name>.front.spz` instead: SHARP's two splats per pixel merged into one
+   * (scripts/spz-front-layer.mjs), half the splats for nearly the same look. Over
+   * Link the full set can drop below the headset's frame rate.
+   */
+  front: boolean;
+  /** WebXR render resolution as a fraction of the headset's recommended size. */
+  framebufferScale: number;
+  /**
+   * Spark's level of detail: replaces splats smaller than a pixel by merged, softer
+   * ones (about 875K instead of 1.18M drawn in VR). Faster, visibly blurrier.
+   */
+  lod: boolean;
 }
 
-/** `?xr&side=old` (default new). */
+/** `?xr&side=old&front=1&fb=0.75&lod=1` (defaults: new, full splats, fb 1, no LoD). */
 export function parseXrOptions(params: URLSearchParams): XrOptions {
-  return { side: params.get("side") === "old" ? "old" : "new" };
+  const num = (key: string, fallback: number, min: number, max: number) => {
+    const v = Number(params.get(key));
+    return params.has(key) && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : fallback;
+  };
+  return {
+    side: params.get("side") === "old" ? "old" : "new",
+    front: params.get("front") === "1",
+    framebufferScale: num("fb", 1, 0.25, 1.5),
+    lod: params.get("lod") === "1",
+  };
 }
 
 /**
@@ -25,8 +47,8 @@ export function parseXrOptions(params: URLSearchParams): XrOptions {
  * photo to bring into the other scene; the thumbsticks move around. Outside VR it
  * falls back to the normal limited-orbit camera.
  *
- * All splats are drawn at full detail (no LoD): on a PC over Quest Link that's fast
- * enough, and Spark's LoD visibly blurred SHARP captures.
+ * All splats are drawn at full detail unless `lod=1`: Spark's LoD visibly blurred
+ * SHARP captures.
  */
 export function createXrViewer(container: HTMLElement, manifest: Manifest, baseUrl: string, opts: XrOptions) {
   // Must run before three.js sets up the session (Chrome over Quest Link gets no frames otherwise).
@@ -108,7 +130,8 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
   const load = async () => {
     const loadSide = (key: Side) => {
       const s = manifest[key];
-      const mesh = new SplatMesh({ url: new URL(s.url, baseUrl).href, onProgress: sideProgress(key) });
+      const url = opts.front ? s.url.replace(/\.spz$/, ".front.spz") : s.url;
+      const mesh = new SplatMesh({ url: new URL(url, baseUrl).href, lod: opts.lod || undefined, onProgress: sideProgress(key) });
       mesh.visible = key === current;
       meshes.push(mesh);
       sideMeshes[key] = placed(mesh, s);
@@ -183,8 +206,8 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
     renderer,
     mode: "vr",
     referenceSpaceType: "local",
-    // Full resolution; Spark defaults to half.
-    frameBufferScaleFactor: 1,
+    // Full resolution by default; Spark defaults to half.
+    frameBufferScaleFactor: opts.framebufferScale,
     // Our own Enter/Exit buttons (VrControls) drive the session; Spark's click handler
     // goes on this detached element and never fires.
     element: document.createElement("span"),
@@ -234,9 +257,13 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
   const perfEl = $<HTMLPreElement>(".perf");
   const perf = new PerfMeter();
   const showPerf = (s: PerfSample) => {
+    // In VR, also on the panel: below the headset's rate Link fills in frames by
+    // warping old ones, which shows as black smeared patches while moving.
+    const target = renderer.xr.isPresenting ? (renderer.xr.getSession()?.frameRate ?? 0) : 0;
+    panel?.setFps(target ? `${Math.round(s.fps)}/${Math.round(target)} fps` : `${Math.round(s.fps)} fps`, !target || s.fps >= target * 0.95);
     perfEl.textContent = [
       `${s.fps.toFixed(0)} fps · ${s.avgMs.toFixed(1)} ms avg · ${s.worstMs.toFixed(0)} ms worst`,
-      `drawn ${formatCount(spark.activeSplats)} splats · ${manifest[current].label}`,
+      `drawn ${formatCount(spark.activeSplats)} splats${opts.front ? " (front layer)" : ""}${opts.lod ? " (LoD)" : ""} · fb ${opts.framebufferScale} · ${manifest[current].label}`,
     ].join("\n");
   };
 

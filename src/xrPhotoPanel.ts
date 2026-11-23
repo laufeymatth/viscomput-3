@@ -64,6 +64,8 @@ export class XrPhotoPanel {
   private buttons: PanelButton[] = [];
   private buttonRects: Rect[] = [];
   private hint = "";
+  private fps = "";
+  private fpsOk = true;
   private keptCoverage: Uint8Array | null = null;
   private currentCoverage: Uint8Array | null = null;
   private points: PromptPoint[] = [];
@@ -175,6 +177,14 @@ export class XrPhotoPanel {
   setButtons(buttons: PanelButton[]) {
     if (JSON.stringify(buttons) === JSON.stringify(this.buttons)) return;
     this.buttons = buttons;
+    this.redraw();
+  }
+
+  /** Small frame-rate readout in the corner: green when the headset's rate is met, red when not. */
+  setFps(text: string, ok: boolean) {
+    if (text === this.fps && ok === this.fpsOk) return;
+    this.fps = text;
+    this.fpsOk = ok;
     this.redraw();
   }
 
@@ -296,9 +306,18 @@ export class XrPhotoPanel {
     const hintY = pr.h + PAD;
     const [line1 = "", line2 = ""] = this.hint.split("\n");
     ctx.textBaseline = "middle";
+    let fpsW = 0;
+    if (this.fps) {
+      ctx.font = "bold 32px ui-monospace, Consolas, monospace";
+      fpsW = ctx.measureText(this.fps).width + 24;
+      ctx.fillStyle = this.fpsOk ? "#9f9" : "#f77";
+      ctx.textAlign = "right";
+      ctx.fillText(this.fps, canvas.width - PAD, hintY + HINT_H * 0.3);
+      ctx.textAlign = "left";
+    }
     ctx.fillStyle = "#fff";
     ctx.font = "bold 38px system-ui, sans-serif";
-    ctx.fillText(line1, PAD, hintY + HINT_H * 0.3, canvas.width - PAD * 2);
+    ctx.fillText(line1, PAD, hintY + HINT_H * 0.3, canvas.width - PAD * 2 - fpsW);
     ctx.fillStyle = "#bbb";
     ctx.font = "32px system-ui, sans-serif";
     ctx.fillText(line2, PAD, hintY + HINT_H * 0.75, canvas.width - PAD * 2);

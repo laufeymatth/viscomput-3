@@ -65,6 +65,18 @@ reconnects). Plain Chrome works too, but each VR start then takes ~100 s.
 Add `&side=old` to start on the old capture. All splats are drawn at full detail; that needs
 the PC, a standalone Quest is too slow for it.
 
+**Frame rate:** the panel shows `fps/headset rate`, red when the PC can't keep up. Then Link
+fills in frames by warping old ones, which shows as black smeared patches while you move.
+Options to compare (add to the address):
+
+- Link's refresh rate at 72 Hz (Meta Quest Link app → Devices → headset → Graphics
+  preferences): same picture, 20% less work.
+- `&fb=0.75`: render at 75% resolution.
+- `&lod=1`: Spark's level of detail, about 875K splats drawn instead of 1.18M, but softer.
+- `&front=1`: load `*.front.spz`, SHARP's two splats per pixel merged into one (half the
+  splats, but clearly worse up close; made with `node scripts/spz-front-layer.mjs in.spz
+  out.front.spz`, only `mine` has them).
+
 **In VR**
 
 - **Old / new:** both captures are loaded and switch live: **grip** while not pointing at the
