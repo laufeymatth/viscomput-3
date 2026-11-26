@@ -19,11 +19,11 @@ export interface PanelPhoto {
 }
 
 export interface PanelHandlers {
-  /** Trigger (positive) or grip (negative) on the photo, in photo pixels. */
-  onPhoto(x: number, y: number, positive: boolean): void;
+  /** Trigger on the photo, in photo pixels. */
+  onPhoto(x: number, y: number): void;
   onButton(id: string): void;
-  /** Grip pressed while not pointing at the panel. */
-  onSqueezeElsewhere(): void;
+  /** Grip pressed, wherever the controller points. */
+  onGrip(): void;
 }
 
 const CANVAS_W = 1280;
@@ -47,7 +47,7 @@ interface Rect {
 /**
  * World-space panel beside the view (DOM isn't visible in VR): the old photo, to
  * point at with the controllers, and a row of buttons. Each controller gets a ray;
- * trigger selects, grip excludes. Everything is drawn into one canvas texture that
+ * trigger selects and presses buttons, grip is passed on. Everything is drawn into one canvas texture that
  * is only redrawn when its contents change.
  */
 export class XrPhotoPanel {
@@ -231,20 +231,23 @@ export class XrPhotoPanel {
 
   private press(pointer: (typeof this.pointers)[number], trigger: boolean) {
     if (!pointer.source) return;
-    const hit = pointer.hit;
-    if (!hit) {
-      if (!trigger) this.handlers.onSqueezeElsewhere();
+    // Grip does one thing wherever you point (exclude points on the photo were dropped:
+    // SAM often grew the mask instead of shrinking it).
+    if (!trigger) {
+      this.handlers.onGrip();
       return;
     }
+    const hit = pointer.hit;
+    if (!hit) return;
     const button = this.buttonAt(hit);
     if (button) {
-      if (trigger && !button.disabled) this.handlers.onButton(button.id);
+      if (!button.disabled) this.handlers.onButton(button.id);
       return;
     }
     const { x, y } = this.canvasPoint(hit);
     const r = this.photoRect;
     if (this.photo && x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) {
-      this.handlers.onPhoto(((x - r.x) / r.w) * this.photo.width, ((y - r.y) / r.h) * this.photo.height, trigger);
+      this.handlers.onPhoto(((x - r.x) / r.w) * this.photo.width, ((y - r.y) / r.h) * this.photo.height);
     }
   }
 

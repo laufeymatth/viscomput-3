@@ -1,12 +1,21 @@
 import * as THREE from "three";
 import { SparkRenderer, SparkXr, SplatMesh } from "@sparkjsdev/spark";
 import { CameraRig } from "./cameraRig";
+import { mirrorXrFrame } from "./xrMirror";
 import { forceClassicXrLayer } from "./xrLayers";
 import type { Manifest, SplatSide } from "./manifest";
-import { PartSelection, type Side } from "./partSelection";
+import { otherSideOf, PartSelection, type Side } from "./partSelection";
 import { pickFromPhoto } from "./photoPicker";
 import { XrPhotoPanel, type PanelButton } from "./xrPhotoPanel";
 import { XrLocomotion } from "./xrLocomotion";
+
+/**
+ * Splats drawn in total (LoD scene + copies for parts). Spark's PC default is 2.5M,
+ * which never limits a 1.18M capture; around 1.13M held 72 fps over Link, 1.4M didn't.
+ */
+const LOD_BUDGET = 1_100_000;
+/** The scene never drops below this, however big the copied parts. */
+const LOD_MIN_SPLATS = 500_000;
 
 export interface XrOptions {
   /** Side shown first; both are loaded and can be switched live. */
@@ -19,14 +28,11 @@ export interface XrOptions {
   front: boolean;
   /** WebXR render resolution as a fraction of the headset's recommended size. */
   framebufferScale: number;
-  /**
-   * Spark's level of detail: replaces splats smaller than a pixel by merged, softer
-   * ones (about 875K instead of 1.18M drawn in VR). Faster, visibly blurrier.
-   */
-  lod: boolean;
+  /** Show the headset's left eye on the page while in VR (for an audience). On unless `mirror=0`. */
+  mirror: boolean;
 }
 
-/** `?xr&side=old&front=1&fb=0.75&lod=1` (defaults: new, full splats, fb 1, no LoD). */
+/** `?side=old&front=1&fb=0.75&mirror=0` (defaults: new, full splats, fb 1, mirror on). */
 export function parseXrOptions(params: URLSearchParams): XrOptions {
   const num = (key: string, fallback: number, min: number, max: number) => {
     const v = Number(params.get(key));
@@ -36,7 +42,7 @@ export function parseXrOptions(params: URLSearchParams): XrOptions {
     side: params.get("side") === "old" ? "old" : "new",
     front: params.get("front") === "1",
     framebufferScale: num("fb", 1, 0.25, 1.5),
-    lod: params.get("lod") === "1",
+    mirror: params.get("mirror") !== "0",
   };
 }
 
@@ -47,8 +53,9 @@ export function parseXrOptions(params: URLSearchParams): XrOptions {
  * photo to bring into the other scene; the thumbsticks move around. Outside VR it
  * falls back to the normal limited-orbit camera.
  *
- * All splats are drawn at full detail unless `lod=1`: Spark's LoD visibly blurred
- * SHARP captures.
+ * Splats are drawn with Spark's level of detail: splats smaller than a pixel are
+ * replaced by merged ones (about 875K instead of 1.18M drawn in VR), which keeps
+ * Quest Link at the headset's frame rate at the cost of a slightly softer picture.
  */
 export function createXrViewer(container: HTMLElement, manifest: Manifest, baseUrl: string, opts: XrOptions) {
   // Must run before three.js sets up the session (Chrome over Quest Link gets no frames otherwise).
@@ -82,7 +89,7 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
   const sideBtn = document.createElement("button");
   sideBtn.type = "button";
   sideBtn.className = "btn";
-  sideBtn.addEventListener("click", () => showSide(otherSide()));
+  sideBtn.addEventListener("click", () => toggleScene());
   const partBtn = document.createElement("button");
   partBtn.type = "button";
   partBtn.className = "btn";
@@ -131,7 +138,13 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
     const loadSide = (key: Side) => {
       const s = manifest[key];
       const url = opts.front ? s.url.replace(/\.spz$/, ".front.spz") : s.url;
-      const mesh = new SplatMesh({ url: new URL(url, baseUrl).href, lod: opts.lod || undefined, onProgress: sideProgress(key) });
+      const mesh = new SplatMesh({
+        url: new URL(url, baseUrl).href,
+        lod: true,
+        // Keep the original splats too: parts are copied from them (partSelection.ts).
+        nonLod: true,
+        onProgress: sideProgress(key),
+      });
       mesh.visible = key === current;
       meshes.push(mesh);
       sideMeshes[key] = placed(mesh, s);
@@ -143,44 +156,58 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
   // Panel beside the view: a photo to select parts on (old or new), and its buttons.
   // A selection per source photo: parts of the old photo go into the new scene and
   // parts of the new photo into the old one.
+  // The scene and the panel's photo switch together: the panel shows the other
+  // capture's photo, whose parts go into the scene being shown.
   const selections: Partial<Record<Side, PartSelection>> = {};
   let photoSide: Side = "old";
   const activeSelection = () => selections[photoSide] ?? null;
   let panel: XrPhotoPanel | null = null;
+  const photoOf = (sel: PartSelection) => ({ url: sel.photoUrl, ...sel.photoSize });
   const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
+  const toggleScene = () => showSide(otherSide());
   const refreshPanel = () => {
     const selection = activeSelection();
-    sideBtn.textContent = `Show ${otherSide()}: ${manifest[otherSide()].label}`;
+    sideBtn.textContent = `Toggle scene (showing ${manifest[current].label})`;
     partBtn.textContent = `✂ ${cap(photoSide)} part` + (selection?.active ? ` (${selection.partCount})` : "");
     if (!panel) return;
-    // Both photos selectable: the buttons pick the photo (the controllers' grip switches
-    // the scene). Otherwise they switch the scene.
-    const buttons: PanelButton[] =
-      selections.old && selections.new
-        ? (["old", "new"] as const).map((k) => ({ id: `photo:${k}`, label: `${cap(k)} photo`, active: photoSide === k }))
-        : (["old", "new"] as const).map((k) => ({ id: k, label: `Show ${k}`, active: current === k }));
-    let hint = "Old / New buttons, or grip anywhere off the panel, switch scenes";
+    const buttons: PanelButton[] = [{ id: "toggle", label: "Toggle scene" }];
+    let hint = "Toggle scene, or grip, switches old/new";
     if (selection) {
       const sel = selection;
       const editing = sel.points.length > 0;
       const busy = sel.state === "segmenting";
-      const partNo = sel.keptCount + 1;
       const kept = sel.keptCount;
       buttons.push(
         { id: "undo", label: "Undo", disabled: !editing && !sel.active },
-        // The step people miss: without it, points for a second object get added to
-        // the first one and SAM tries to make one mask covering both.
-        { id: "next", label: "✓ Keep part", primary: editing, disabled: !editing || busy },
         { id: "clear", label: "Clear", disabled: !sel.active && !editing },
+        // Parts only go into the scene with this, so one object is picked at a time
+        // (points for a second object would otherwise join the first part).
+        { id: "next", label: "✓ Add to scene", primary: editing, disabled: !editing || busy },
       );
-      const keptNote = kept ? `${kept} kept part${kept > 1 ? "s" : ""} (blue). ` : "";
+      // Per part, next to Add: only while a part is highlighted. Sky repaints the
+      // other scene's own sky in these colours instead of copying the part in.
+      if (sel.canReplace) {
+        buttons.push({
+          id: "replace",
+          label: `Is sky: ${editing && sel.replaceMode ? "true" : "false"}`,
+          active: editing && sel.replaceMode,
+          disabled: !editing || busy,
+        });
+      }
+      const addedNote = kept ? `${kept} part${kept > 1 ? "s" : ""} added (blue). ` : "";
+      const match = sel.currentMatch;
+      const matchNote =
+        match === undefined ? ""
+        : sel.currentMismatch ? `\nIs sky: the ${sel.target} photo shows something else here (${Math.round(match * 100)}% match), so it's added as a normal part`
+        : `\nIs sky: repaints the ${sel.target} scene's sky in these colours (${Math.round(match * 100)}% match)`;
       hint =
         sel.state === "loading" ? "Loading segmentation…\nThe photo can be pointed at in a moment"
         : sel.state === "error" ? `Segmentation failed: ${sel.error}\nUndo or Clear to try again`
-        : busy ? `Segmenting part ${partNo}…\nOne object per part: ✓ Keep part before starting the next object`
-        : editing ? `Part ${partNo} (orange): happy with it? Press ✓ Keep part\nOnly add points on this SAME object. A different object needs a new part.`
-        : kept ? `${keptNote}Point at another object to start part ${partNo}\nUndo removes the last kept part · grip off the panel switches old/new`
-        : `Point at ONE object in the ${sel.source} photo to bring it into the ${sel.target} scene\nTrigger selects · grip on the photo removes · grip elsewhere switches old/new`;
+        : busy ? `Finding the object…\nThis takes a moment`
+        : editing && matchNote ? `Press ✓ Add to scene to add it${matchNote}`
+        : editing ? `Press ✓ Add to scene to add it\nMore points on the same object refine it · for the sky, set Is sky first`
+        : kept ? `${addedNote}Pick another object to add\nUndo removes the last added part · grip toggles the scene`
+        : `Pick an object in the ${sel.source} photo, then press ✓ Add to scene\nTrigger selects · grip toggles the scene`;
       panel.setSelection(sel.keptCoverage, sel.currentCoverage, sel.points);
     }
     panel.setButtons(buttons);
@@ -191,6 +218,13 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
     if (sideMeshes.old) sideMeshes.old.visible = key === "old";
     if (sideMeshes.new) sideMeshes.new.visible = key === "new";
     for (const sel of Object.values(selections)) sel.setShowingTarget(key === sel.target);
+    // The panel follows: the photo whose parts go into this scene.
+    const sel = selections[otherSideOf(key)];
+    if (sel && sel.source !== photoSide) {
+      photoSide = sel.source;
+      panel?.setPhoto(photoOf(sel));
+      void sel.load().catch(() => {});
+    }
     showStatus();
     refreshPanel();
   }
@@ -214,7 +248,7 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
     onReady: (supported) => {
       // Browsers only expose WebXR on secure pages: https, or http://localhost.
       const reason = !window.isSecureContext
-        ? `VR blocked: plain http on ${location.hostname} isn't a secure page. Open http://localhost:${location.port}/?xr instead`
+        ? `VR blocked: plain http on ${location.hostname} isn't a secure page. Open http://localhost:${location.port}/ instead`
         : "VR not available in this browser (needs a headset)";
       vrStatus = supported ? "VR ready" : reason;
       showStatus();
@@ -256,14 +290,25 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
   // Small stats line on the 2D page.
   const perfEl = $<HTMLPreElement>(".perf");
   const perf = new PerfMeter();
+  /** Splats copied in for parts, shown in the current scene. */
+  const copiedInView = () => {
+    const sel = selections[otherSide()]; // the one whose parts show in the current scene
+    return sel?.target === current ? sel.copiedSplats : 0;
+  };
   const showPerf = (s: PerfSample) => {
+    const copied = copiedInView();
     // In VR, also on the panel: below the headset's rate Link fills in frames by
     // warping old ones, which shows as black smeared patches while moving.
     const target = renderer.xr.isPresenting ? (renderer.xr.getSession()?.frameRate ?? 0) : 0;
     panel?.setFps(target ? `${Math.round(s.fps)}/${Math.round(target)} fps` : `${Math.round(s.fps)} fps`, !target || s.fps >= target * 0.95);
+    const behind = target > 0 && s.fps < target * 0.95;
     perfEl.textContent = [
       `${s.fps.toFixed(0)} fps · ${s.avgMs.toFixed(1)} ms avg · ${s.worstMs.toFixed(0)} ms worst`,
-      `drawn ${formatCount(spark.activeSplats)} splats${opts.front ? " (front layer)" : ""}${opts.lod ? " (LoD)" : ""} · fb ${opts.framebufferScale} · ${manifest[current].label}`,
+      `drawn ${formatCount(spark.activeSplats)} splats${opts.front ? " (front layer)" : ""} (LoD)` +
+        (copied ? `, ${formatCount(copied)} copied for parts` : "") +
+        ` · fb ${opts.framebufferScale} · ${manifest[current].label}`,
+      // Link's frame warping (ASW) is a Link setting, not something the page can turn off.
+      ...(behind ? ["Black blinking? Press Ctrl + Numpad 1 on the PC to turn Link's frame warping off"] : []),
     ].join("\n");
   };
 
@@ -287,7 +332,11 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
           rig.update(dt);
         }
         panel?.update(presenting);
+        // Copies for parts come out of the LoD budget, so adding parts doesn't push the
+        // total past what keeps the headset's frame rate.
+        spark.lodSplatCount = Math.max(LOD_MIN_SPLATS, LOD_BUDGET - copiedInView());
         renderer.render(scene, presenting ? xrCamera : rig.camera);
+        if (presenting && session && opts.mirror) mirrorXrFrame(renderer, session);
         const sample = perf.frame(now);
         if (sample) showPerf(sample);
       });
@@ -306,7 +355,8 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
       const [source, target] = side === "old" ? [oldMesh, newMesh] : [newMesh, oldMesh];
       selections[side] = new PartSelection(manifest, baseUrl, side, source, target, refreshPanel);
     }
-    const first = selections.old ?? selections.new;
+    // Start on the photo whose parts go into the scene shown (or the only selectable one).
+    const first = selections[otherSide()] ?? selections.old ?? selections.new;
     if (first) {
       photoSide = first.source;
       // Bring the selected part into view as soon as it changes.
@@ -314,28 +364,20 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
         const sel = activeSelection();
         if (sel && current !== sel.target) showSide(sel.target);
       };
-      const photoOf = (sel: PartSelection) => ({ url: sel.photoUrl, ...sel.photoSize });
       panel = new XrPhotoPanel(photoOf(first), {
-        onPhoto: (x, y, positive) => {
-          activeSelection()?.addPoint({ x, y, positive });
+        onPhoto: (x, y) => {
+          activeSelection()?.addPoint({ x, y, positive: true });
           showTarget();
         },
         onButton: (id) => {
           const sel = activeSelection();
-          if (id === "old" || id === "new") showSide(id);
-          else if (id === "photo:old" || id === "photo:new") {
-            const next = selections[id === "photo:old" ? "old" : "new"];
-            if (!next) return;
-            photoSide = next.source;
-            panel?.setPhoto(photoOf(next));
-            void next.load().catch(() => {});
-            showTarget();
-            refreshPanel();
-          } else if (id === "undo") sel?.undo();
+          if (id === "toggle") toggleScene();
+          else if (id === "undo") sel?.undo();
           else if (id === "next") sel?.nextPart();
           else if (id === "clear") sel?.clear();
+          else if (id === "replace") sel?.setReplaceMode(!sel.replaceMode);
         },
-        onSqueezeElsewhere: () => showSide(otherSide()),
+        onGrip: toggleScene,
       });
       void first.load().catch(() => {});
       partBtn.hidden = false;
@@ -350,8 +392,8 @@ export function createXrViewer(container: HTMLElement, manifest: Manifest, baseU
     } else {
       panel = new XrPhotoPanel(null, {
         onPhoto: () => {},
-        onButton: (id) => (id === "old" || id === "new") && showSide(id),
-        onSqueezeElsewhere: () => showSide(otherSide()),
+        onButton: (id) => id === "toggle" && toggleScene(),
+        onGrip: toggleScene,
       });
     }
     scene.add(panel.group);

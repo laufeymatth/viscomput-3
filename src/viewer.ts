@@ -182,6 +182,7 @@ function setupReplace(
       embeddingsUrl: new URL(oldSide.sam!, baseUrl).href,
       imageWidth: oldIntrinsics.width,
       imageHeight: oldIntrinsics.height,
+      imageUrl: new URL(oldSide.image!, baseUrl).href,
     });
     segmenter.catch(() => (segmenter = null)); // allow a retry after a failed load
 

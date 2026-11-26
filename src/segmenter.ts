@@ -1,6 +1,7 @@
 import * as ort from "onnxruntime-web/wasm";
 import wasmUrl from "onnxruntime-web/ort-wasm-simd-threaded.wasm?url";
 import mjsUrl from "onnxruntime-web/ort-wasm-simd-threaded.mjs?url";
+import { growToEdges, upsample } from "./maskRefine";
 import { MASK_SIZE } from "./photoMask";
 
 // Self-hosted runtime. GitHub Pages can't send the COOP/COEP headers threads need, so stay single-threaded.
@@ -21,6 +22,15 @@ const EMBEDDING_SHAPES = [
   [1, 256, 64, 64],
 ] as const;
 
+export interface SegmentOptions {
+  /**
+   * Grow the mask out into neighbouring pixels that look like its inside (maskRefine.ts).
+   * Closes SAM's gap between a sky and the roofs and trees around it, but spills into
+   * the surroundings of other things, so only for sky.
+   */
+  growToEdges?: boolean;
+}
+
 export interface PromptPoint {
   /** Photo pixel coordinates. */
   x: number;
@@ -39,6 +49,8 @@ export class Segmenter {
     private readonly embeddings: ort.Tensor[],
     private readonly imageWidth: number,
     private readonly imageHeight: number,
+    /** The photo's colours on the mask grid (RGB 0..1), to grow sky masks to their edges (null: never). */
+    private readonly guide: Float32Array | null,
   ) {}
 
   static async load(opts: {
@@ -46,20 +58,31 @@ export class Segmenter {
     embeddingsUrl: string;
     imageWidth: number;
     imageHeight: number;
+    /** The photo itself: mask edges grow out to its real edges. */
+    imageUrl?: string;
   }): Promise<Segmenter> {
     const dataUrl = `${opts.decoderUrl}_data`;
-    const [session, embeddings] = await Promise.all([
+    const [session, embeddings, guide] = await Promise.all([
       ort.InferenceSession.create(opts.decoderUrl, {
         executionProviders: ["wasm"],
         externalData: [{ path: dataUrl.split("/").pop()!, data: dataUrl }],
       }),
       loadEmbeddings(opts.embeddingsUrl),
+      opts.imageUrl ? loadGuide(opts.imageUrl).catch(() => null) : null,
     ]);
-    return new Segmenter(session, embeddings, opts.imageWidth, opts.imageHeight);
+    return new Segmenter(session, embeddings, opts.imageWidth, opts.imageHeight, guide);
   }
 
-  /** Returns a MASK_SIZE² coverage mask (0..255, row 0 = top of the photo). */
-  async segment(points: PromptPoint[]): Promise<Uint8Array> {
+  /** Returns a MASK_SIZE² coverage mask (0..255, row 0 = top of the photo): the candidate SAM scores highest. */
+  async segment(points: PromptPoint[], opts: SegmentOptions = {}): Promise<Uint8Array> {
+    const { masks, scores } = await this.segmentAll(points, opts);
+    let best = 0;
+    for (let i = 1; i < scores.length; i++) if (scores[i] > scores[best]) best = i;
+    return masks[best];
+  }
+
+  /** All of SAM's candidate masks for these points (whole / part / subpart), with its scores. */
+  async segmentAll(points: PromptPoint[], opts: SegmentOptions = {}): Promise<{ masks: Uint8Array[]; scores: Float32Array }> {
     const sx = SAM_INPUT / this.imageWidth;
     const sy = SAM_INPUT / this.imageHeight;
     const coords = new Float32Array(points.flatMap((p) => [p.x * sx, p.y * sy]));
@@ -74,17 +97,37 @@ export class Segmenter {
       "image_embeddings.2": this.embeddings[2],
     });
 
-    // Three candidate masks; take the one the model scores highest.
-    const iou = out.iou_scores.data as Float32Array;
-    let best = 0;
-    for (let i = 1; i < iou.length; i++) if (iou[i] > iou[best]) best = i;
-    const plane = MASK_SIZE * MASK_SIZE;
-    const logits = (out.pred_masks.data as Float32Array).subarray(best * plane, (best + 1) * plane);
-
-    const mask = new Uint8Array(plane);
-    for (let i = 0; i < plane; i++) mask[i] = Math.round(255 / (1 + Math.exp(-logits[i])));
-    return mask;
+    const scores = out.iou_scores.data as Float32Array;
+    const plane = SAM_MASK * SAM_MASK;
+    const all = out.pred_masks.data as Float32Array;
+    const masks = Array.from(scores, (_, k) => {
+      // Upsample the logits (not the 0..1 mask), as SAM does: sharper edges.
+      const logits = upsample(all.subarray(k * plane, (k + 1) * plane), SAM_MASK, MASK_SIZE);
+      let p: Float32Array = logits.map((l) => 1 / (1 + Math.exp(-l)));
+      if (opts.growToEdges && this.guide) p = growToEdges(this.guide, p, MASK_SIZE);
+      return Uint8Array.from(p, (v) => Math.round(v * 255));
+    });
+    return { masks, scores };
   }
+}
+
+/** SAM's own mask output size. */
+const SAM_MASK = 256;
+
+/** The photo's colours (RGB 0..1), squeezed onto the square mask grid like the masks. */
+async function loadGuide(url: string): Promise<Float32Array> {
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  img.src = url;
+  await img.decode();
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = MASK_SIZE;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+  ctx.drawImage(img, 0, 0, MASK_SIZE, MASK_SIZE);
+  const px = ctx.getImageData(0, 0, MASK_SIZE, MASK_SIZE).data;
+  const out = new Float32Array(MASK_SIZE * MASK_SIZE * 3);
+  for (let i = 0; i < MASK_SIZE * MASK_SIZE; i++) for (let k = 0; k < 3; k++) out[i * 3 + k] = px[i * 4 + k] / 255;
+  return out;
 }
 
 async function loadEmbeddings(url: string): Promise<ort.Tensor[]> {

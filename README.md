@@ -1,6 +1,9 @@
 # Splat Compare
 
-Phone-first viewer for comparing two Gaussian splat captures of the same place (old vs new) with a draggable vertical split. Both sides share one camera, which can move slightly (drag/pinch, or device tilt) for a sense of depth.
+Compares two Gaussian splat captures of the same place (old vs new). The main viewer is in VR
+(PC + Meta Quest Link): stand in either capture and bring parts of one photo into the other
+scene. `?web` opens the phone/desktop viewer instead, with a draggable vertical split; both
+sides share one camera, which can move slightly (drag/pinch, or device tilt) for a sense of depth.
 
 Built with Vite, vanilla TypeScript, three.js and [Spark](https://sparkjs.dev).
 
@@ -11,8 +14,9 @@ npm install
 npm run dev      # serves on your LAN too, for testing on a phone
 ```
 
-Open `/?c=<id>` to load `public/comparisons/<id>/manifest.json` (default: `mine`).
-Tilt needs HTTPS on phones.
+`/` opens the VR viewer (see VR below), `/?web` the phone/desktop split viewer. Add
+`c=<id>` to load `public/comparisons/<id>/manifest.json` (default: `mine`), e.g.
+`/?web&c=mine`. Tilt needs HTTPS on phones.
 
 ## Adding a comparison
 
@@ -23,8 +27,9 @@ Tilt needs HTTPS on phones.
 
 ## Bringing parts of one photo into the other scene
 
-"✂ Old part" lets you tap a region of the old photo (SAM 2.1 segmentation) and see the
-old splats replace the new ones there. A side can be selected from when the manifest has its
+In VR, the photo panel does this (see VR below); in the `?web` viewer, "✂ Old part" lets you
+tap a region of the old photo (SAM 2.1 segmentation) and see the old splats replace the new
+ones there. A side can be selected from when the manifest has its
 `image`, `sam` and `intrinsics`, plus the other side's `intrinsics`; both photos must be taken
 from the same spot (SHARP single-image splats). In `mine` both sides can.
 
@@ -42,8 +47,8 @@ Then add `"sam": "old.sam.bin"` to that side in the manifest. The matching decod
 
 ## VR (PC + Meta Quest Link)
 
-`/?xr` opens the WebXR view: one scene at a time, with the photo's viewpoint placed at your
-head. The PC renders and the headset displays over Link.
+`/` (the default) opens the WebXR view: one scene at a time, with the photo's viewpoint placed
+at your head. The PC renders and the headset displays over Link.
 
 1. Connect the headset with Link (Meta Quest Link app on the PC; in the headset, Quick
    Settings → Link).
@@ -51,7 +56,7 @@ head. The PC renders and the headset displays over Link.
 3. Open Chrome with the sandbox off, in its own profile (fast VR start, see below):
 
 ```powershell
-& "C:\Program Files\Google\Chrome\Application\chrome.exe" --no-sandbox --user-data-dir="$env:LOCALAPPDATA\chrome-xr-dev" "http://localhost:5173/?xr&c=mine"
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --no-sandbox --user-data-dir="$env:LOCALAPPDATA\chrome-xr-dev" "http://localhost:5173/"
 ```
 
 4. Click **Enter VR**.
@@ -62,36 +67,58 @@ If the page says no headset was found, close that window completely and run the 
 (Chrome connects to the headset only when it starts, so this is also needed after Link
 reconnects). Plain Chrome works too, but each VR start then takes ~100 s.
 
-Add `&side=old` to start on the old capture. All splats are drawn at full detail; that needs
-the PC, a standalone Quest is too slow for it.
+Add `&side=old` to start on the old capture. Splats are drawn with Spark's level of detail:
+splats smaller than a pixel are replaced by merged ones (about 875K drawn instead of 1.18M),
+slightly softer but much easier to keep at the headset's frame rate. It still needs the PC; a
+standalone Quest is too slow for it. The page shows the headset's view while in VR (`&mirror=0`
+turns that off).
 
 **Frame rate:** the panel shows `fps/headset rate`, red when the PC can't keep up. Then Link
-fills in frames by warping old ones, which shows as black smeared patches while you move.
+fills in frames by warping old ones (ASW), which shows as black smeared patches while you move.
+
+- **Stop the blinking:** while in VR, press **Ctrl + Numpad 1** on the PC keyboard. That turns
+  Link's frame warping off until Link restarts (Ctrl + Numpad 4 turns it back to automatic);
+  frame drops then show as slight judder instead. The page shows this hint whenever the fps is
+  below the headset's rate. To keep it off for good: Oculus Debug Tool
+  (`C:\Program Files\Meta Horizon\Support\oculus-diagnostics\OculusDebugTool.exe`) →
+  Asynchronous Spacewarp → Disabled.
+
 Options to compare (add to the address):
 
 - Link's refresh rate at 72 Hz (Meta Quest Link app → Devices → headset → Graphics
   preferences): same picture, 20% less work.
 - `&fb=0.75`: render at 75% resolution.
-- `&lod=1`: Spark's level of detail, about 875K splats drawn instead of 1.18M, but softer.
 - `&front=1`: load `*.front.spz`, SHARP's two splats per pixel merged into one (half the
   splats, but clearly worse up close; made with `node scripts/spz-front-layer.mjs in.spz
   out.front.spz`, only `mine` has them).
 
 **In VR**
 
-- **Old / new:** both captures are loaded and switch live: **grip** while not pointing at the
-  panel, or the page's Show old/new button.
-- **The panel** to your left shows a photo. Point a controller at it: **trigger** adds a point
-  to select, **grip** adds a point to exclude. Each point re-runs SAM and the selected part
-  appears in the other scene immediately. One object per part: the part being edited is orange;
-  press **✓ Keep part** before pointing at the next object, otherwise the new points are added
-  to the same part and SAM tries to cover both. Kept parts turn blue. **Undo** removes the last
-  point (or the last kept part); **Clear** removes all. **Old photo / New photo** pick which
-  photo you select on (old parts go into the new scene and new parts into the old one). The
-  page's ✂ button does the same with the mouse. SAM runs on the main thread, so expect a short
-  hitch per point.
+- **Old / new:** both captures are loaded and switch live: the panel's **Toggle scene**,
+  **grip** (anywhere), or the page's Toggle scene button. The panel's
+  photo switches with the scene: it always shows the other capture, whose parts go into the
+  scene you're in (old parts into the new scene, new parts into the old one).
+- **The panel** to your left shows that photo. Point a controller at it and pull the
+  **trigger** on an object: SAM finds it and shows it in orange on the panel (more points on
+  the same object refine it; there are no exclude points, SAM tended to grow the mask
+  instead). Press **✓ Add to scene** to put it into the scene; added parts turn blue on the
+  panel. Parts only go into the scene with that button, so one object is picked at a time.
+  **Undo** removes the last point (or the last added part); **Clear** removes all. The page's ✂
+  button does the same with the mouse. SAM runs on the main thread, so expect a short hitch per
+  point.
 - **Added parts** hide the other scene's splats only around their own depth, so anything
   standing in front of them stays visible.
+- **Is sky: true/false** (next to ✓ Add to scene) is set per part, so it can only be pressed while
+  a part is highlighted, and each new part starts as false. For the sky: the same points are
+  also segmented on the other photo, and that scene's own sky splats are repainted with the
+  selected sky's colours (extended smoothly behind whatever stands in front of it in the
+  selected photo). Nothing is copied over, so it costs no extra splats, and the other scene's
+  trees and people stay in front. The hint shows how well the two skies match; under 50% the
+  points picked something else there and the part is added normally. Sky masks also grow out
+  to the photo's real edges (SAM leaves a gap around roofs and trees); other parts keep SAM's
+  own outline, since growing spilled into their surroundings.
+- Normal parts copy only their own splats into the other scene (the page's stats line shows
+  how many), so adding people costs little.
 - **Moving:** **left stick** walks where you look, **right stick** left/right turns (faster
   the further you push), up/down rises and sinks, **right stick press** jumps back to the
   photo's viewpoint. SHARP splats look right only near that viewpoint, so expect stretching
